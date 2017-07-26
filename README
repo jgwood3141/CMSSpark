@@ -1,0 +1,21 @@
+To start:
+
+source setup_env.sh
+
+For storage studies, need the same date for all three, can thrwo --ran_all option to try and run all at once, but also may cause memory crashes if range is too large or too many variables are added.  Option to aggregate job counting by site, or accross all sites if False
+
+run_spark cmsSpark_storageStudies.py --run_agg_ph --agg_by_site=True --fout=hdfs:////cms/users/jgwood/storage_v70/ --fromdate=20160505 --todate=20170512 --yarn
+run_spark cmsSpark_storageStudies.py --run_agg_jm --agg_by_site=True --fout=hdfs:////cms/users/jgwood/storage_v70/ --fromdate=20160505 --todate=20170512 --yarn
+run_spark cmsSpark_storageStudies.py --run_analyze --agg_by_site=True --fout=hdfs:////cms/users/jgwood/storage_v70/ --fromdate=20160505 --todate=20170512 --yarn
+
+After these run, dump results to csv :
+source make_csv.sh -din /cms/users/jgwood/storage_v70/agg_jm_20160505_20170512/ -fout output/storage_v70/data/jm_agg.csv -grepvkey primds
+source make_csv.sh -din /cms/users/jgwood/storage_v70/analyze_agg_20160505_20170512/ -fout output/storage_v70/data/analyze_agg.csv -grepvkey primds
+
+Then run plotting and final aggregation code via pandas:
+mkdir -p output/stoage_vXX/data
+mkdir -p output/stoage_vXX/plots
+cd src/python/CMSSpark/
+python cmsSpark_storageStudies_stats.py --din="../../../output/storage_v66/data/" --dout="../../../output/storage_v66/plots/" --agg_by_site=True > ../../../output/storage_v66/plots/out.log
+
+Still working on agg_by_site=False plots and analysis, tried adding more vars and resulted in mem crash. Also, prob is merging with phedex drops ~1/2 of drops relative to jobCount from the jm-popularity database...still working on this

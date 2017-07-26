@@ -13,6 +13,7 @@ import sys
 import time
 import json
 from datetime import datetime as dt
+from datetime import date, timedelta
 from types import NoneType
 from subprocess import Popen, PIPE
 
@@ -132,16 +133,54 @@ def file_list(basedir, fromdate=None, todate=None):
         if matching:
             dirdate_dic[idir] = dt.strptime(matching.group(1), "%Y-%m-%d")
 
+    # If could not match dir, try looking up to four dates back
+    if not from_match:
+        #print("### could not find fromdate dir, trying one date previous")
+        tries=0
+        while tries<5:
+            new_fromdate = fromdate-timedelta(days=(tries+1))
+            new_o_fromdate = dt.strftime(new_fromdate,"%Y-%m-%d")
+            for idir in dirs:
+                if  idir.find(new_o_fromdate) != -1:
+                    from_match = 1
+                    fromdate=new_fromdate
+                matching = pattern.search(idir)
+                if  matching:
+                    dirdate_dic[idir] = dt.strptime(matching.group(1), "%Y-%m-%d")
+            if  from_match:
+                break
+            else:
+                tries+=1
+
+    if not to_match:
+        #print("### could not find todate dir, trying one date ahead")
+        tries=0
+        while tries<5:
+            new_todate = todate+timedelta(days=(tries+1))
+            new_o_todate = dt.strftime(new_todate,"%Y-%m-%d")
+            for idir in dirs:
+                if  idir.find(new_o_todate) != -1:
+                    to_match = 1
+                    todate=new_todate
+                matching = pattern.search(idir)
+                if matching:
+                    dirdate_dic[idir] = dt.strptime(matching.group(1), "%Y-%m-%d")
+            if to_match:
+                break
+            else:
+                tries+=1
+
     if  not from_match:
         raise Exception("Unable to find fromdate=%s are on HDFS %s" % (o_fromdate, basedir))
     if  not to_match:
         raise Exception("Unable to find todate=%s are on HDFS %s" % (o_todate, basedir))
     return [k for k, v in dirdate_dic.items() if v >= fromdate and v <= todate]		
 
+
 def print_rows(df, dfname, verbose, head=5):
     "Helper function to print rows from a given dataframe"
     if  verbose:
-        print("First rows of %s" % dfname)
+        print("\n\nFirst rows of %s" % dfname)
         for row in df.head(head):
             print("### row", row)
 
@@ -174,6 +213,31 @@ def phedex_tables(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False):
                     .options(treatEmptyValuesAsNulls='true', nullValue='null')\
                     .load(file_path, schema = schema_phedex()) \
                     for file_path in pfiles])
+
+    # Register temporary tables to be able to use sqlContext.sql
+    phedex_df.registerTempTable('phedex_df')
+
+    tables = {'phedex_df':phedex_df}
+    return tables
+
+
+def phedex_tables_multiday(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False, fromdate=None, todate=None):
+    """
+    Parse PhEDEx records on HDFS via mapping PhEDEx tables to Spark SQLContext.
+    :returns: a dictionary with PhEDEx Spark DataFrame.
+    """
+    phxdir = hdir+'/phedex/block-replicas-snapshots/csv/'
+
+    # phedex data
+    pfiles = file_list(phxdir, fromdate, todate)
+    msg = "Phedex snapshot found %d directories" % len(pfiles)
+    print(msg)
+    phedex_df = unionAll([sqlContext.read.format('com.databricks.spark.csv')
+                    .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                    .load(file_path, schema = schema_phedex()) \
+                    for file_path in pfiles])
+                    
+    #phedex_df.persist(StorageLevel.MEMORY_AND_DISK)
 
     # Register temporary tables to be able to use sqlContext.sql
     phedex_df.registerTempTable('phedex_df')
@@ -330,6 +394,40 @@ def jm_tables(ctx, sqlContext,
     tables = {'jm_df': df}
     return tables
 
+
+def jm_tables_multiday(ctx, sqlContext,
+        hdir='hdfs:///project/awg/cms/jm-data-popularity/avro-snappy', fromdate=None, todate=None, verbose=None):
+    """
+    Parse JobMonitoring popularity HDFS records.
+
+    Example of jm-data-popularity record on HDFS
+    {"JobId":"1672451388","FileName":"//store/file.root","IsParentFile":"0","ProtocolUsed":"Remote",
+    "SuccessFlag":"1","FileType":"EDM","LumiRanges":"unknown","StrippedFiles":"0","BlockId":"602064",
+    "StrippedBlocks":"0","BlockName":"Dummy","InputCollection":"DoesNotApply","Application":"CMSSW",
+    "Type":"reprocessing","SubmissionTool":"wmagent","InputSE":"","TargetCE":"","SiteName":"T0_CH_CERN",
+    "SchedulerName":"PYCONDOR","JobMonitorId":"unknown","TaskJobId":"1566463230",
+    "SchedulerJobIdV2":"664eef36-f1c3-11e6-88b9-02163e0184a6-367_0","TaskId":"35076445",
+    "TaskMonitorId":"wmagent_pdmvserv_task_S_640","JobExecExitCode":"0",
+    "JobExecExitTimeStamp":1488375506000,"StartedRunningTimeStamp":1488374686000,
+    "FinishedTimeStamp":1488375506000,"WrapWC":"820","WrapCPU":"1694.3","ExeCPU":"0",
+    "UserId":"124370","GridName":"Alan Malta Rodrigues"}
+
+    :returns: a dictionary with JobMonitoring Spark DataFrame
+    """
+    rdd = avro_rdd_multiday(ctx, sqlContext, hdir, fromdate, todate, verbose)
+    
+    # create new spark DataFrame
+    jdf = sqlContext.createDataFrame(rdd, schema=schema_jm())
+
+    df = jdf.withColumn("WrapWC", jdf["WrapWC"].cast(DoubleType()))\
+            .withColumn("WrapCPU", jdf["WrapCPU"].cast(DoubleType()))\
+            .withColumn("ExeCPU", jdf["ExeCPU"].cast(DoubleType()))
+    
+    df.registerTempTable('jm_df')
+    tables = {'jm_df': df}
+    return tables
+
+
 def avro_rdd(ctx, sqlContext, hdir, date=None, verbose=None):
     """
     Parse avro-snappy files on HDFS
@@ -368,6 +466,58 @@ def avro_rdd(ctx, sqlContext, hdir, date=None, verbose=None):
     if  verbose:
         print("### avro records", records, type(records))
     return avro_rdd
+
+
+def avro_rdd_multiday(ctx, sqlContext, hdir, fromdate=None, todate=None, verbose=None):
+    """
+    Parse avro-snappy files on HDFS
+    :returns: a Spark RDD object
+    """
+    print("### from date, hdir: ", fromdate)
+    print("### to date,   hdir: ", todate)
+    
+    # Create list of paths for files
+    pathlist=[]
+    if ( fromdate==None or todate==None ):
+        fromdate = time.strftime("year=%Y/month=%-m/date=%-d", time.gmtime(time.time()-60*60*24))
+        frompath = '%s/%s' % (hdir, fromdate)
+        pathlist.extend(frompath)
+        todate   = time.strftime("year=%Y/month=%-m/date=%-d", time.gmtime(time.time()-60*60*24))
+        topath   = '%s/%s' % (hdir, todate)
+        pathlist.append(topath)
+    else:
+        start_date = date(int(fromdate[5:9]), int(fromdate[fromdate.find("month=")+6:fromdate.find("/day=")]), int(fromdate[fromdate.find("day=")+4:]))
+        end_date   = date(int(todate[5:9]), int(todate[todate.find("month=")+6:todate.find("/day=")]), int(todate[todate.find("day=")+4:]))
+        delta = end_date - start_date
+        for iDay in range(delta.days + 1):
+            iDate = start_date + timedelta(days=iDay)
+            iDate_str = iDate.strftime("year=%Y/month=%-m/day=%-d")
+            iDate_path = '%s/%s' % (hdir, iDate_str)
+            pathlist.append(iDate_path)
+            
+    afiles = []
+    for iPath in pathlist:
+        afiles.extend(avro_files(iPath, verbose=verbose))
+        #afiles.append("%s/part-*.avro" % iPath)
+    print("### found %s avro_files" % len(afiles))
+
+    # define newAPIHadoopFile parameters, java classes
+    aformat="org.apache.avro.mapreduce.AvroKeyInputFormat"
+    akey="org.apache.avro.mapred.AvroKey"
+    awrite="org.apache.hadoop.io.NullWritable"
+    aconv="org.apache.spark.examples.pythonconverters.AvroWrapperToJavaConverter"
+
+    # load data from HDFS
+    rdd = ctx.union([ctx.newAPIHadoopFile(f, aformat, akey, awrite, aconv) for f in afiles])
+    
+    # the records are stored as [(dict, None), (dict, None)], therefore we take first element
+    # and assign them to new rdd
+    avro_rdd = rdd.map(lambda x: x[0])
+    records = avro_rdd.take(1) # take function will return list of records
+    if  verbose:
+        print("### avro records", records, type(records))
+    return avro_rdd
+
 
 def aaa_tables(sqlContext,
         hdir='hdfs:///project/monitoring/archive/xrootd/raw/gled',
@@ -474,6 +624,13 @@ def split_dataset(df, dcol):
             .withColumn("procds", split(col(dcol), "/").alias('procds').getItem(2))\
             .withColumn("tier", split(col(dcol), "/").alias('tier').getItem(3))\
             .drop(dcol)
+    return ndf
+
+def split_dataset_noDrop(df, dcol):
+    "Split dataset name in DataFrame into primds,procds,tier components"
+    ndf = df.withColumn("primds", split(col(dcol), "/").alias('primds').getItem(1))\
+            .withColumn("procds", split(col(dcol), "/").alias('procds').getItem(2))\
+            .withColumn("tier", split(col(dcol), "/").alias('tier').getItem(3))
     return ndf
 
 def unpack_struct(colname, df):
