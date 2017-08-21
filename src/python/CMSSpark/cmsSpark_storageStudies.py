@@ -298,8 +298,10 @@ def run_agg_jm(ctx,sqlContext,start_date, end_date, agg_interval, fout, agg_by_s
     tables.update(dbs_tables_all(sqlContext, verbose=verbose))
     dbs_d_df = tables['ddf'] # dataset table
     dbs_f_df = tables['fdf'] # file table
+    dbs_f_df_v1 = dbs_f_df.withColumn("f_logical_file_name_stripped",  F.regexp_replace( F.regexp_replace( F.regexp_replace(F.col("f_logical_file_name"),"////","/"), "///", "/"), "//","/" ) )
+    dbs_f_df_v1.registerTempTable('fdf_v1')
     print_rows(dbs_d_df, "dbs_d_df", verbose)
-    print_rows(dbs_f_df, "dbs_f_df", verbose)
+    print_rows(dbs_f_df_v1, "dbs_f_df_v1", verbose)
 
     dbs_sel_cols = ['d_dataset_id', 'd_dataset', 'd_creation_date', 'f_event_count','f_file_size']
     stmt  = 'SELECT %s FROM ddf ' % ','.join(dbs_sel_cols) 
@@ -328,7 +330,7 @@ def run_agg_jm(ctx,sqlContext,start_date, end_date, agg_interval, fout, agg_by_s
     jm_df_date = jm_df.withColumn("job_begin_sec",  f_job_sec )\
                       .withColumn("jm_interval",    f_job_interval )\
                       .withColumn("job_day",        f_job_day )\
-                      .withColumn("file_name",      F.regexp_replace( F.regexp_replace(F.col("FileName"),"//","/"), " ", "") )
+                      .withColumn("file_name",      F.regexp_replace( F.regexp_replace( F.regexp_replace(F.col("FileName"),"////","/"), "///", "/"), "//","/" ) )
     jm_df_date.registerTempTable('jm_df_date')
     print_rows(jm_df_date, "jm_df_date", verbose)
     print("Number of jm_df entries before dbs join: %s" % jm_df.count())
@@ -350,8 +352,8 @@ def run_agg_jm(ctx,sqlContext,start_date, end_date, agg_interval, fout, agg_by_s
             ]
     stmt  = 'SELECT %s FROM jm_df_date ' % ','.join(cols)       # Select distinct, found duplicate jobs
     #stmt += 'JOIN fdf ON fdf.f_logical_file_name = jm_df_date.FileName ' # Join jobMonitoring to DBS file dataframes based on fileName
-    stmt += 'JOIN fdf ON fdf.f_logical_file_name = jm_df_date.file_name ' # Join jobMonitoring to DBS file dataframes based on fileName
-    stmt += 'JOIN dbs_agg ON dbs_agg.d_dataset_id = fdf.f_dataset_id '   # Join DBS file and dataset dataframes based on datasetID
+    stmt += 'JOIN fdf_v1 ON fdf_v1.f_logical_file_name_stripped = jm_df_date.file_name ' # Join jobMonitoring to DBS file dataframes based on fileName
+    stmt += 'JOIN dbs_agg ON dbs_agg.d_dataset_id = fdf_v1.f_dataset_id '   # Join DBS file and dataset dataframes based on datasetID
     #stmt += 'WHERE jm_df_date.Type = "analysis" '                        # Select on analysis type jobs
     #stmt += 'WHERE jm_df_date.JobExecExitCode = "0" '
     join_df = sqlContext.sql(stmt)
