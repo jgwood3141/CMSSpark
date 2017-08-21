@@ -72,6 +72,18 @@ def files(path, verbose=0):
     fnames = [f for f in pipe.stdout.read().split('\n') if f.find('part') != -1]
     return fnames
 
+def files_all(path_list, verbose=0):
+    "Return list of files for given HDFS path list"
+    fnames = []
+    for path in path_list:
+        hpath = "hadoop fs -ls %s | awk '{print $8}'" % path
+        if  verbose:
+            print("Lookup area: %s" % hpath)
+        pipe = Popen(hpath, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, close_fds=True)
+        pipe.wait()
+        fnames.extend([f for f in pipe.stdout.read().split('\n') if f.find('part') != -1])
+    return fnames
+
 def avro_files(path, verbose=0):
     "Return list of files for given HDFS path"
     hpath = "hadoop fs -ls %s | awk '{print $8}'" % path
@@ -307,6 +319,88 @@ def dbs_tables(sqlContext, hdir='hdfs:///project/awg/cms', inst='GLOBAL', verbos
                         .options(treatEmptyValuesAsNulls='true', nullValue='null')\
                         .load(path, schema = schema_file_lumis()) \
                         for path in files(paths['flpath'], verbose)])
+
+    # Register temporary tables to be able to use sqlContext.sql
+    daf.registerTempTable('daf')
+    ddf.registerTempTable('ddf')
+    bdf.registerTempTable('bdf')
+    fdf.registerTempTable('fdf')
+    aef.registerTempTable('aef')
+    pef.registerTempTable('pef')
+    mcf.registerTempTable('mcf')
+    ocf.registerTempTable('ocf')
+    rvf.registerTempTable('rvf')
+    flf.registerTempTable('flf')
+
+    tables = {'daf':daf, 'ddf':ddf, 'bdf':bdf, 'fdf':fdf, 'aef':aef, 'pef':pef, 'mcf':mcf, 'ocf':ocf, 'rvf':rvf, 'flf': flf}
+    return tables
+
+def dbs_tables_all(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False):
+    """
+    Parse DBS records on HDFS via mapping DBS tables to Spark SQLContext.
+    :returns: a dictionary with DBS Spark DataFrame.
+    """
+    inst_list = ["GLOBAL","PHYS01","PHYS02","PHYS03"]
+
+    paths = {'dpath':[], 'bpath':[], 'fpath':[], 'apath':[], 'ppath':[], 'mcpath':[], 'ocpath':[], 'rvpath':[], 'flpath':[], 'dapath':[]}
+    for iInst in inst_list:
+        dbsdir = hdir+'/CMS_DBS3_PROD_%s/current' % iInst
+        paths['dpath'].append( apath(dbsdir, 'DATASETS') )
+        paths['bpath'].append( apath(dbsdir, 'BLOCKS') )
+        paths['fpath'].append( apath(dbsdir, 'FILES') )
+        paths['apath'].append( apath(dbsdir, 'ACQUISITION_ERAS') )
+        paths['ppath'].append( apath(dbsdir, 'PROCESSING_ERAS') )
+        paths['mcpath'].append( apath(dbsdir, 'DATASET_OUTPUT_MOD_CONFIGS') )
+        paths['ocpath'].append( apath(dbsdir, 'OUTPUT_MODULE_CONFIGS') )
+        paths['rvpath'].append( apath(dbsdir, 'RELEASE_VERSIONS') )
+        paths['flpath'].append( apath(dbsdir, 'FILE_LUMIS') )
+        paths['dapath'].append( apath(dbsdir, 'DATASET_ACCESS_TYPES') )
+    print("Use the following data on HDFS")
+    for key, val in paths.items():
+        print(val)
+
+    # define DBS tables
+    daf = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_dataset_access_types()) \
+                        for path in files_all(paths['dapath'], verbose)])
+    ddf = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_datasets()) \
+                        for path in files_all(paths['dpath'], verbose)])
+    bdf = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_blocks()) \
+                        for path in files_all(paths['bpath'], verbose)])
+    fdf = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_files()) \
+                        for path in files_all(paths['fpath'], verbose)])
+    aef = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_acquisition_eras()) \
+                        for path in files_all(paths['apath'], verbose)])
+    pef = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_processing_eras()) \
+                        for path in files_all(paths['ppath'], verbose)])
+
+    mcf = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_mod_configs()) \
+                        for path in files_all(paths['mcpath'], verbose)])
+    ocf = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_out_configs()) \
+                        for path in files_all(paths['ocpath'], verbose)])
+    rvf = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_rel_versions()) \
+                        for path in files_all(paths['rvpath'], verbose)])
+    flf = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_file_lumis()) \
+                        for path in files_all(paths['flpath'], verbose)])
 
     # Register temporary tables to be able to use sqlContext.sql
     daf.registerTempTable('daf')

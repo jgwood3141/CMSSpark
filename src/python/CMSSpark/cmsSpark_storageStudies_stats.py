@@ -219,7 +219,7 @@ def summary_analyze_agg_aggBySite(din, dout):
     tot_jobs = df["nJobsTot"].sum()
     print("    nJobs total:    %s \n" % tot_jobs )
     
- 
+    
     # Print table, summed accross all sites
     print("\n\n### Total [PB] Deleted and Recalled Over 1-6 Months \n")
     print("\t Month      Deleted    Recalled    Ratio \n")

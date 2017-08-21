@@ -25,7 +25,7 @@ from pyspark.sql.window import Window
 from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType, StringType
 
 # CMSSpark modules
-from CMSSpark.spark_utils import dbs_tables, phedex_tables_multiday, jm_tables_multiday, print_rows, unionAll, files
+from CMSSpark.spark_utils import dbs_tables, dbs_tables_all, phedex_tables_multiday, jm_tables_multiday, print_rows, unionAll, files
 from CMSSpark.spark_utils import spark_context, aaa_tables, split_dataset, split_dataset_noDrop
 from CMSSpark.utils import elapsed_time
 
@@ -178,9 +178,8 @@ def schema_agg_phedex():
     """
     return StructType([
              StructField("ph_interval", IntegerType(), True),
-             StructField("node_name", StringType(), True),
+             StructField("ph_site", StringType(), True),
              StructField("dataset_name", StringType(), True),
-             StructField("dataset_is_open", StringType(), True),
              StructField("avg_pbr_size", DoubleType(), True)
              ])
 
@@ -192,6 +191,7 @@ def schema_agg_jm(agg_by_site=True):
     if agg_by_site:
         return StructType([
                 StructField("d_dataset", StringType(), True),
+                StructField("d_dataset_id", IntegerType(), True),
                 StructField("d_nevents", IntegerType(), True),
                 StructField("d_size", DoubleType(), True),
                 StructField("d_creation_date", DoubleType(), True),
@@ -207,6 +207,7 @@ def schema_agg_jm(agg_by_site=True):
     else:
         return StructType([
                 StructField("d_dataset", StringType(), True),
+                StructField("d_dataset_id", IntegerType(), True),
                 StructField("d_nevents", IntegerType(), True),
                 StructField("d_size", DoubleType(), True),
                 StructField("d_creation_date", DoubleType(), True),
@@ -242,26 +243,29 @@ def run_agg_phedex(ctx,sqlContext, start_date, end_date, agg_interval, fout, yar
     tables.update(phedex_tables_multiday(sqlContext, verbose=verbose, fromdate=ph_fromdate, todate=ph_todate))
     ph_df       = tables['phedex_df']
        
-    # add sortable date columns to phedex records
+    # add sortable date columns to phedex records, and strip _Export, _MSS, _Disk, _Buffer, from T0, T1 sites
     ph_df = ph_df.withColumn("now_day",     F.date_format(ph_df["now_sec"].cast('timestamp'),"yyyyMMdd"))\
-                 .withColumn("ph_interval", F.floor(ph_df["now_sec"]/agg_interval) )
+                 .withColumn("ph_interval", (F.floor(ph_df["now_sec"]/agg_interval)).cast('integer') )\
+                 .withColumn("ph_site",     F.regexp_replace(F.col("node_name"),"(_Export|_Buffer|_Disk|_MSS)",""))
+                 #.withColumn("ph_site",     F.regexp_extract(F.col("node_name"),"[^_]*_[^_]*_[^_]*",0))
     print_rows(ph_df, "ph_df", verbose)
     
     # aggregate phedex information, to get dataset size for each site, for each day
-    ph_sel_cols  = ['ph_interval', 'now_day', 'node_name', 'dataset_name', 'dataset_is_open', 'block_bytes']
-    ph_gb_cols   = ['ph_interval', 'now_day', 'node_name', 'dataset_name', 'dataset_is_open']
+    ph_sel_cols  = ['ph_interval', 'now_day', 'ph_site', 'dataset_name', 'block_bytes']
+    ph_gb_cols   = ['ph_interval', 'now_day', 'ph_site', 'dataset_name']
     ph_df_agg_v0 = ph_df.select(ph_sel_cols)\
                         .groupBy(ph_gb_cols)\
                         .agg( F.sum('block_bytes').alias('pbr_size') )
     print_rows(ph_df_agg_v0, "ph_df_agg_v0", verbose)
     
     # Aggregate accross interval, getting avg size for each dataset
-    ph_sel_cols  = ['ph_interval', 'node_name', 'dataset_name', 'dataset_is_open', 'pbr_size']
-    ph_gb_cols   = ['ph_interval', 'node_name', 'dataset_name', 'dataset_is_open']
+    ph_sel_cols  = ['ph_interval', 'ph_site', 'dataset_name', 'pbr_size']
+    ph_gb_cols   = ['ph_interval', 'ph_site', 'dataset_name']
     ph_df_agg_vf = ph_df_agg_v0.select(ph_sel_cols)\
                                .groupBy(ph_gb_cols)\
                                .agg( F.avg('pbr_size').alias('avg_pbr_size') )
     print_rows(ph_df_agg_vf, "ph_df_agg_vf", verbose)
+    #ph_df_agg_vf.orderBy('ph_site').groupBy('ph_site').agg(F.count('dataset_name')).show(n=300)
 
     # write out results back to HDFS, the fout parameter defines area on HDFS
     # it is either absolute path or area under /user/USERNAME
@@ -272,7 +276,7 @@ def run_agg_phedex(ctx,sqlContext, start_date, end_date, agg_interval, fout, yar
         ndf.persist(StorageLevel.MEMORY_AND_DISK)
         ndf.write.format("com.databricks.spark.csv")\
                  .option("header", "true").save(fout_temp)
-        ndf.unpersist()
+        #ndf.unpersist()
     
 
 
@@ -291,10 +295,12 @@ def run_agg_jm(ctx,sqlContext,start_date, end_date, agg_interval, fout, agg_by_s
     
     # read DBS tables, has info about datasets
     tables = {}
-    tables.update(dbs_tables(sqlContext, inst=inst, verbose=verbose))
+    tables.update(dbs_tables_all(sqlContext, verbose=verbose))
     dbs_d_df = tables['ddf'] # dataset table
     dbs_f_df = tables['fdf'] # file table
-    
+    print_rows(dbs_d_df, "dbs_d_df", verbose)
+    print_rows(dbs_f_df, "dbs_f_df", verbose)
+
     dbs_sel_cols = ['d_dataset_id', 'd_dataset', 'd_creation_date', 'f_event_count','f_file_size']
     stmt  = 'SELECT %s FROM ddf ' % ','.join(dbs_sel_cols) 
     stmt += 'JOIN fdf on ddf.d_dataset_id = fdf.f_dataset_id '
@@ -321,28 +327,16 @@ def run_agg_jm(ctx,sqlContext,start_date, end_date, agg_interval, fout, agg_by_s
     f_job_interval = F.floor(((F.col("StartedRunningTimeStamp")*0.001)/agg_interval))
     jm_df_date = jm_df.withColumn("job_begin_sec",  f_job_sec )\
                       .withColumn("jm_interval",    f_job_interval )\
-                      .withColumn("job_day",        f_job_day )
+                      .withColumn("job_day",        f_job_day )\
+                      .withColumn("file_name",      F.regexp_replace( F.regexp_replace(F.col("FileName"),"//","/"), " ", "") )
     jm_df_date.registerTempTable('jm_df_date')
     print_rows(jm_df_date, "jm_df_date", verbose)
-    
-    
-    # read AAA file for a given date
-    #date = aaa_date(date)
-    #tables.update(aaa_tables(sqlContext, date=date, verbose=verbose))
-    #aaa_df = tables['aaa_df'] # aaa table
-    #aaa_df_labeled = aaa_df.withColumn('source_tag_aaa',F.lit('aaa'))
-    #aaa_df_labeled.registerTempTable('aaa_df_labeled')
-
-    # merge DBS, PhEDEx, and AAA data
-    #cols = ['node_name','d_dataset','file_lfn','pbr_size','dataset_is_open','max_replica_time','source_tag_aaa','start_time','end_time']
-    #stmt =  'SELECT %s FROM ddf ' % ','.join(cols) 
-    #stmt += 'JOIN fdf ON ddf.d_dataset_id = fdf.f_dataset_id ' # JOIN DBS dataset and file dfs
-    #stmt += 'JOIN ph_df_agg ON ddf.d_dataset = ph_df_agg.dataset_name ' # JOIN ph and DBS dfs
-    #stmt += 'JOIN aaa_df_labeled ON (fdf.f_logical_file_name = aaa_df_labeled.file_lfn AND ph_df_agg.node_name = aaa_df_labeled.server_site) ' # JOIN aaa and phedex 
+    print("Number of jm_df entries before dbs join: %s" % jm_df.count())
     
     
     # Columns for JOINS
     cols = ['dbs_agg.d_dataset AS d_dataset',
+            'dbs_agg.d_dataset_id AS d_dataset_id',
             'dbs_agg.d_evts AS d_nevents',
             'dbs_agg.d_size AS d_size',
             'dbs_agg.d_creation_date AS d_creation_date',
@@ -354,23 +348,26 @@ def run_agg_jm(ctx,sqlContext,start_date, end_date, agg_interval, fout, agg_by_s
             'jm_df_date.WrapWC AS job_wrap_wc',
             'jm_df_date.WrapCPU AS job_wrap_cpu'
             ]
-    stmt  = 'SELECT DISTINCT %s FROM jm_df_date ' % ','.join(cols)       # Select distinct, found duplicate jobs
-    stmt += 'JOIN fdf ON fdf.f_logical_file_name = jm_df_date.FileName ' # Join jobMonitoring to DBS file dataframes based on fileName
+    stmt  = 'SELECT %s FROM jm_df_date ' % ','.join(cols)       # Select distinct, found duplicate jobs
+    #stmt += 'JOIN fdf ON fdf.f_logical_file_name = jm_df_date.FileName ' # Join jobMonitoring to DBS file dataframes based on fileName
+    stmt += 'JOIN fdf ON fdf.f_logical_file_name = jm_df_date.file_name ' # Join jobMonitoring to DBS file dataframes based on fileName
     stmt += 'JOIN dbs_agg ON dbs_agg.d_dataset_id = fdf.f_dataset_id '   # Join DBS file and dataset dataframes based on datasetID
-    stmt += 'WHERE jm_df_date.Type = "analysis" '                        # Select on analysis type jobs
+    #stmt += 'WHERE jm_df_date.Type = "analysis" '                        # Select on analysis type jobs
+    #stmt += 'WHERE jm_df_date.JobExecExitCode = "0" '
     join_df = sqlContext.sql(stmt)
     print_rows(join_df, stmt, verbose)
-
+    print("Number of jm_df entries after dbs join: %s" % join_df.count())
+    
     # Use Window function to calculate Delta T between accesses on dataset
-    if agg_by_site: agg_cols = ['d_dataset','job_site']
-    else:           agg_cols = ['d_dataset']
+    if agg_by_site: agg_cols = ['d_dataset','d_dataset_id','job_site']
+    else:           agg_cols = ['d_dataset','d_dataset_id']
     w_dt  = Window.partitionBy(agg_cols).orderBy("job_begin")
     f_dt  = F.col("job_begin")-F.lag("job_begin",1).over(w_dt)
     dt_df = join_df.withColumn("job_delta_t", f_dt).fillna(0.0,"job_delta_t")
 
     # aggregate dataframe
-    if agg_by_site: join_agg_cols = ['d_dataset', 'd_nevents', 'd_size', 'd_creation_date', 'job_interval', 'job_site']
-    else:           join_agg_cols = ['d_dataset', 'd_nevents', 'd_size', 'd_creation_date', 'job_interval']
+    if agg_by_site: join_agg_cols = ['d_dataset', 'd_dataset_id', 'd_nevents', 'd_size', 'd_creation_date', 'job_interval', 'job_site']
+    else:           join_agg_cols = ['d_dataset', 'd_dataset_id', 'd_nevents', 'd_size', 'd_creation_date', 'job_interval']
     join_df_agg = dt_df.groupBy(join_agg_cols)\
                        .agg( F.count('job_fileName').alias('nJobs'),
                              F.min('job_begin').alias('first_job_begin'),
@@ -384,7 +381,8 @@ def run_agg_jm(ctx,sqlContext,start_date, end_date, agg_interval, fout, agg_by_s
     # it is either absolute path or area under /user/USERNAME
     if  fout:
         print("### Writing out source aggregation table for %s to %s" % (start_date, end_date) )
-        fout_temp = "%s/agg_jm_%s_%s/" % (fout,start_date,end_date)
+        if agg_by_site: fout_temp = "%s/agg_jm_aggBySite_%s_%s/" % (fout,start_date,end_date)
+        else:           fout_temp = "%s/agg_jm_%s_%s/" % (fout,start_date,end_date)
         ndf = split_dataset_noDrop(join_df_agg, 'd_dataset')
         ndf.persist(StorageLevel.MEMORY_AND_DISK)
         ndf.write.format("com.databricks.spark.csv")\
@@ -417,10 +415,11 @@ def run_analyze_agg(ctx,sqlContext,fromdate, todate, fout, agg_by_site=True, yar
                         .options(header='true',treatEmptyValuesAsNulls='true', nullValue='null')\
                         .load(path, schema = schema_agg_phedex()) \
                         for path in f_input])
+    
     ph_df.registerTempTable('ph_df')
-
+    
     if not agg_by_site: 
-        ph_df_agg = ph_df.groupby(["ph_interval","dataset_name","dataset_is_open","avg_pbr_size"])\
+        ph_df_agg = ph_df.groupby(["ph_interval","dataset_name","avg_pbr_size"])\
                          .agg( F.count("node_name").alias("nSites"),
                                F.sum("avg_pbr_size").alias("avg_pbr_size_allsites") )
         ph_df_agg.registerTempTable('ph_df_agg')                         
@@ -431,15 +430,16 @@ def run_analyze_agg(ctx,sqlContext,fromdate, todate, fout, agg_by_site=True, yar
     temp_path = fout
     if fout[-1]!="/":
         temp_path += "/"
-    f_input.append("%sagg_jm_%s_%s/part*" % (temp_path,fromdate,todate))
+    if agg_by_site: f_input.append("%sagg_jm_aggBySite_%s_%s/part*" % (temp_path,fromdate,todate))
+    else:           f_input.append("%sagg_jm_%s_%s/part*" % (temp_path,fromdate,todate))
     
     jm_df = unionAll([sqlContext.read.format('com.databricks.spark.csv')
                         .options(header='true',treatEmptyValuesAsNulls='true', nullValue='null')\
                         .load(path, schema = schema_agg_jm(agg_by_site)) \
                         for path in f_input])
     jm_df.registerTempTable('jm_df')
-    #print("NJobs in JobMonitoring: \n")
-    #print(jm_df.agg(F.sum("nJobs")).show())
+    print("NJobs in JobMonitoring: \n")
+    print(jm_df.agg(F.sum("nJobs")).show())
 
     # Columns for JOINS
     if agg_by_site:
@@ -449,6 +449,7 @@ def run_analyze_agg(ctx,sqlContext,fromdate, todate, fout, agg_by_site=True, yar
         cols = ['ph_df.dataset_name AS dataset',
                 'ph_df.node_name AS site',
                 'ph_df.avg_pbr_size AS pbr_size',
+                'jm_df.job_interval AS job_interval',
                 'jm_df.nJobs AS nJobs',
                 'jm_df.first_job_begin AS first_job_begin',
                 'jm_df.last_job_begin AS last_job_begin',
@@ -472,18 +473,13 @@ def run_analyze_agg(ctx,sqlContext,fromdate, todate, fout, agg_by_site=True, yar
                 ]
         
     stmt  = 'SELECT %s FROM jm_df ' % ','.join(cols) # Select distinct, found duplicate jobs
-    if agg_by_site: stmt += 'LEFT JOIN ph_df ON (ph_df.node_name=jm_df.job_site AND ph_df.dataset_name=jm_df.d_dataset AND ph_df.ph_interval=jm_df.job_interval) ' 
+    if agg_by_site: stmt += 'JOIN ph_df ON (ph_df.node_name=jm_df.job_site AND ph_df.dataset_name=jm_df.d_dataset AND ph_df.ph_interval=jm_df.job_interval) ' 
     else:           stmt += 'JOIN ph_df_agg ON (ph_df_agg.dataset_name=jm_df.d_dataset AND ph_df_agg.ph_interval=jm_df.job_interval) ' 
     join_df = sqlContext.sql(stmt)
-    print_rows(join_df, stmt, verbose)
-    #print("NJobs in JobMonitoring After Joining with Phedex: \n")
-    #print(join_df.agg(F.sum("nJobs")).show())
-
-    ## ARRRRGGGHHH!!!!! QUIT HERE, WHY AM I LOSING SO MANY JOBS WHEN JOINING JM AND PHEDEX?!!!
-    #null_df = join_df.where(F.col("dataset").isNotNull()).count()
-    #print( "NULL DF has %s entries" % null_df)
-    #print_rows(null_df, "NULL DF", verbose=True)
-
+    print_rows(join_df, stmt, verbose=True, head=10)
+    print("NJobs in JobMonitoring After Joining with Phedex: \n")
+    print(join_df.agg(F.sum("nJobs")).show())
+    
     # Use Window function to calculate Delta T between accesses on dataset
     if agg_by_site: agg_cols = ['dataset','site']
     else:           agg_cols = ['dataset']
@@ -610,6 +606,121 @@ def run_analyze_agg(ctx,sqlContext,fromdate, todate, fout, agg_by_site=True, yar
                  .option("header", "true").save(fout_temp)
         ndf.unpersist()
 
+
+
+# Analyze Aggregated Records            
+def run_analyze_agg_TEST(ctx,sqlContext,fromdate, todate, fout, agg_by_site=True, yarn=None, verbose=None, inst='GLOBAL'):        
+    """
+    Main function to run pyspark job. It requires a schema file, an HDFS directory
+    with data and optional script with mapper/reducer functions.
+    """
+
+    # input sanitation, check time delta between fromdate and todate
+    if len(fromdate) != 8:
+        raise Exception("Given fromdate %s is not in YYYYMMDD format" %s)
+    if len(todate) != 8:
+        raise Exception("Given todate %s is not in YYYYMMDD format" %s)
+    
+    # Read aggregated phedex data
+    f_input = []
+    temp_path = fout
+    if fout[-1]!="/":
+        temp_path += "/"
+    f_input.append("%sagg_phedex_%s_%s/part*" % (temp_path,fromdate,todate))
+    
+    ph_df = unionAll([sqlContext.read.format('com.databricks.spark.csv')
+                        .options(header='true',treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_agg_phedex()) \
+                        for path in f_input])
+
+    print_rows(ph_df, "ph_df", verbose=True, head=10)
+    ph_df.registerTempTable('ph_df')
+
+    if not agg_by_site: 
+        ph_df_agg = ph_df.groupby(["ph_interval","dataset_name","avg_pbr_size"])\
+                         .agg( F.count("ph_site").alias("nSites"),
+                               F.sum("avg_pbr_size").alias("avg_pbr_size_allsites") )
+        ph_df_agg.registerTempTable('ph_df_agg')                         
+                  
+
+    # Read aggregated jm data 
+    f_input = []
+    temp_path = fout
+    if fout[-1]!="/":
+        temp_path += "/"
+    if agg_by_site: f_input.append("%sagg_jm_aggBySite_%s_%s/part*" % (temp_path,fromdate,todate))
+    else:           f_input.append("%sagg_jm_%s_%s/part*" % (temp_path,fromdate,todate))
+    
+    jm_df = unionAll([sqlContext.read.format('com.databricks.spark.csv')
+                        .options(header='true',treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(path, schema = schema_agg_jm(agg_by_site)) \
+                        for path in f_input])
+    jm_df.registerTempTable('jm_df')
+    print("NJobs in JobMonitoring: \n")
+    print(jm_df.agg(F.sum("nJobs")).show())
+
+    # Columns for JOINS
+    if agg_by_site:
+        #'jm_df.d_nevents AS d_nevents',
+        #'jm_df.d_size AS d_size',
+        #'jm_df.d_creation_date AS d_creation_date',
+
+        #'ph_df.avg_pbr_size AS pbr_size',
+        #'jm_df.first_job_begin AS first_job_begin',
+        #'jm_df.last_job_begin AS last_job_begin',
+        #'jm_df.tot_wc AS tot_wc',
+        #'jm_df.tot_cpu AS tot_cpu',
+        #'jm_df.interval_max_delta_t AS interval_max_delta_t'
+        cols = ['ph_df.dataset_name AS dataset',
+                'ph_df.ph_site AS site',
+                'ph_df.ph_interval AS ph_interval',
+                'jm_df.nJobs AS nJobs',
+                'jm_df.d_dataset AS job_dname',
+                'jm_df.job_site AS job_site',
+                'jm_df.job_interval AS job_interval'
+                ]
+    else:
+        #'jm_df.d_nevents AS d_nevents',
+        #'jm_df.d_size AS d_size',
+        #'jm_df.d_creation_date AS d_creation_date',
+        cols = ['ph_df_agg.dataset_name AS dataset',
+                'ph_df_agg.nSites AS nSites',
+                'ph_df_agg.avg_pbr_size_allsites AS pbr_size_allsites',
+                'jm_df.nJobs AS nJobs',
+                'jm_df.first_job_begin AS first_job_begin',
+                'jm_df.last_job_begin AS last_job_begin',
+                'jm_df.tot_wc AS tot_wc',
+                'jm_df.tot_cpu AS tot_cpu',
+                'jm_df.interval_max_delta_t AS interval_max_delta_t'
+                ]
+        
+    stmt  = 'SELECT %s FROM jm_df ' % ','.join(cols) # Select distinct, found duplicate jobs
+    if agg_by_site: 
+        stmt += 'LEFT JOIN ph_df ON (ph_df.ph_site=jm_df.job_site AND ph_df.dataset_name=jm_df.d_dataset AND ph_df.ph_interval=jm_df.job_interval) ' 
+        #stmt += 'WHERE (ph_df.node_name IS NULL) ' 
+        #stmt += 'WHERE (ph_df.node_name="None" OR ph_df.dataset_name="None" OR ph_df.ph_interval="None") ' 
+        #stmt += 'WHERE (ph_df.node_name IS NULL OR ph_df.dataset_name IS NULL OR ph_df.ph_interval IS NULL) ' 
+        #stmt += 'WHERE NOT EXISTS (SELECT %s FROM ph_df WHERE (ph_df.node_name=jm_df.job_site AND ph_df.dataset_name=jm_df.d_dataset AND ph_df.ph_interval=jm_df.job_interval) '  % ','.join(cols) 
+    else:           stmt += 'JOIN ph_df_agg ON (ph_df_agg.dataset_name=jm_df.d_dataset AND ph_df_agg.ph_interval=jm_df.job_interval) ' 
+    join_df = sqlContext.sql(stmt)
+    #print_rows(join_df, stmt, verbose=True, head=10)
+    print("NJobs in JobMonitoring After Joining with Phedex: \n")
+    print(join_df.agg(F.sum("nJobs")).show())
+
+    #join_df_2 = join_df.select("*").where(F.col("site").isNull())
+
+    # write out results back to HDFS, the fout parameter defines area on HDFS
+    # it is either absolute path or area under /user/USERNAME
+    if  fout:
+        print("### Writing out final table")
+        ndf = split_dataset_noDrop(join_df, 'dataset')
+        ndf.persist(StorageLevel.MEMORY_AND_DISK)
+        fout_temp = "%s/TEST_analyze_agg_%s_%s/" % (fout,fromdate,todate)
+        ndf.write.format("com.databricks.spark.csv")\
+                 .option("header", "true").save(fout_temp)
+        ndf.unpersist()
+
+
         
 ### MAIN ####
 def main():
@@ -644,8 +755,9 @@ def main():
         run_agg_jm(ctx,sqlContext,opts.fromdate, opts.todate, opts.agg_interval, opts.fout, opts.agg_by_site, opts.yarn, opts.verbose, inst)
 
     if opts.run_all or opts.run_analyze:
-        run_analyze_agg(ctx,sqlContext,opts.fromdate, opts.todate, opts.fout, opts.agg_by_site, opts.yarn, opts.verbose, inst)
-
+        #run_analyze_agg(ctx,sqlContext,opts.fromdate, opts.todate, opts.fout, opts.agg_by_site, opts.yarn, opts.verbose, inst)
+        run_analyze_agg_TEST(ctx,sqlContext,opts.fromdate, opts.todate, opts.fout, opts.agg_by_site, opts.yarn, opts.verbose, inst)
+        
     # End Spark Context
     ctx.stop()
 
