@@ -22,6 +22,12 @@ from pyspark.sql import HiveContext
 # CMSSpark modules
 from CMSSpark.spark_utils import spark_context, print_rows, unionAll
 from CMSSpark.utils import elapsed_time
+from CMSSpark.schemas import aggregated_data_schema
+
+def print_data(data):
+    "Helper function for testing purposes"
+    for row in data:
+        print(row)
 
 def send2monit(data):
     """
@@ -206,8 +212,8 @@ def send2monit(data):
             creds['producer'], creds['topic'], [(host, port)])
         arr = []
         for idx, row in enumerate(data):
-            if  not idx:
-                print("### row", row, type(row))
+#            if  not idx:
+#                print("### row", row, type(row))
             doc = json.loads(row)
             hid = doc.get("hash", 1)
             arr.append(amq.make_notification(doc, hid))
@@ -235,8 +241,10 @@ class OptionParser():
         msg = "AMQ credentials JSON file (should be named as amq_broker.json)"
         self.parser.add_argument("--amq", action="store",
             dest="amq", default="amq_broker.json", help=msg)
+        self.parser.add_argument("--aggregation_schema", action="store_true",
+            dest="aggregation_schema", default=False, help="use aggregation schema for data upload (needed for correct var types)")
 
-def run(path, amq, stomp, yarn=None, verbose=False):
+def run(path, amq, stomp, yarn=None, aggregation_schema=False, verbose=False):
     """
     Main function to run pyspark job. It requires a schema file, an HDFS directory
     with data and optional script with mapper/reducer functions.
@@ -262,14 +270,26 @@ def run(path, amq, stomp, yarn=None, verbose=False):
     pipe = Popen(hpath, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, close_fds=True)
     pipe.wait()
     pfiles = [f for f in pipe.stdout.read().split('\n') if f.find('part-') != -1]
-    df = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
-                    .options(treatEmptyValuesAsNulls='true', nullValue='null', header='true')\
+    df = []
+
+    if aggregation_schema:
+        df = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                    .options(treatEmptyValuesAsNulls='true', nullValue='null', header='true') \
+                    .load(fname, schema=aggregated_data_schema()) for fname in pfiles])
+    else:
+        df = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                    .options(treatEmptyValuesAsNulls='true', nullValue='null', header='true') \
                     .load(fname) for fname in pfiles])
 
     # Register temporary tables to be able to use sqlContext.sql
     df.registerTempTable('df')
     print_rows(df, "DataFrame", verbose)
 
+    print('Schema:')
+    df.printSchema()
+
+    # for testing uncomment line below
+    # df.toJSON().foreachPartition(print_data)
     # send data to CERN MONIT via stomp AMQ, see send2monit function
     df.toJSON().foreachPartition(send2monit)
 
@@ -281,7 +301,7 @@ def main():
     opts = optmgr.parser.parse_args()
     print("Input arguments: %s" % opts)
     time0 = time.time()
-    run(opts.hdir, opts.amq, opts.stomp, opts.yarn, opts.verbose)
+    run(opts.hdir, opts.amq, opts.stomp, opts.yarn, opts.aggregation_schema, opts.verbose)
     print('Start time  : %s' % time.strftime('%Y-%m-%d %H:%M:%S GMT', time.gmtime(time0)))
     print('End time    : %s' % time.strftime('%Y-%m-%d %H:%M:%S GMT', time.gmtime(time.time())))
     print('Elapsed time: %s sec' % elapsed_time(time0))

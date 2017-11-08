@@ -339,6 +339,7 @@ def schema_jm():
     return StructType([
         StructField("JobId", StringType(), True),
         StructField("FileName", StringType(), True),
+        StructField("IsParentFile", StringType(), True),
         StructField("ProtocolUsed", StringType(), True),
         StructField("SuccessFlag", StringType(), True),
         StructField("FileType", StringType(), True),
@@ -349,14 +350,23 @@ def schema_jm():
         StructField("BlockName", StringType(), True),
         StructField("InputCollection", StringType(), True),
         StructField("Application", StringType(), True),
+        StructField("ApplicationVersion", StringType(), True),
         StructField("Type", StringType(), True),
+        StructField("GenericType", StringType(), True),
+        StructField("NewGenericType", StringType(), True),
+        StructField("NewType", StringType(), True),
         StructField("SubmissionTool", StringType(), True),
         StructField("InputSE", StringType(), True),
         StructField("TargetCE", StringType(), True),
         StructField("SiteName", StringType(), True),
+        StructField("SchedulerName", StringType(), True),
+        StructField("JobMonitorId", StringType(), True),
+        StructField("TaskJobId", StringType(), True),
         StructField("SchedulerJobIdV2", StringType(), True),
         StructField("TaskId", StringType(), True),
         StructField("TaskMonitorId", StringType(), True),
+        StructField("NEventsPerJob", StringType(), True),
+        StructField("NTaskSteps", StringType(), True),
         StructField("JobExecExitCode", StringType(), True),
         StructField("JobExecExitTimeStamp", LongType(), True),
         StructField("StartedRunningTimeStamp", LongType(), True),
@@ -364,6 +374,11 @@ def schema_jm():
         StructField("WrapWC", StringType(), True),
         StructField("WrapCPU", StringType(), True),
         StructField("ExeCPU", StringType(), True),
+        StructField("NCores", StringType(), True),
+        StructField("NEvProc", StringType(), True),
+        StructField("NEvReq", StringType(), True),
+        StructField("WNHostName", StringType(), True),
+        StructField("JobType", StringType(), True),
         StructField("UserId", StringType(), True),
         StructField("GridName", StringType(), True)
         ])
@@ -433,3 +448,62 @@ def schema_asodb():
         StructField("tm_start_time", DoubleType(), True),
         StructField("tm_end_time", DoubleType(), True),
     ])
+
+
+def aggregated_data_schema():
+    """
+    dn: string (nullable = true)
+    dataset_name: string (nullable = true)
+    site_name: string (nullable = true)
+    app: string (nullable = true)
+    uid: integer (nullable = true)
+    stream: string (nullable = true)
+    timestamp: integer (nullable = true)
+    nacc: integer (nullable = true)
+    distinct_users: integer (nullable = true)
+    site_tier: string (nullable = true)
+    cpu_time double (nullable = true)
+    primary_name: string (nullable = true)
+    processing_name: string (nullable = true)
+    data_tier: string (nullable = true)
+    """
+
+    return StructType([
+        StructField("dn", StringType(), True),
+        StructField("dataset_name", StringType(), True),
+        StructField("site_name", StringType(), True),
+        StructField("app", StringType(), True),
+        StructField("uid", LongType(), True),
+        StructField("stream", StringType(), True),
+        StructField("timestamp", LongType(), True),
+        StructField("nacc", IntegerType(), True),
+        StructField("distinct_users", IntegerType(), True),
+        StructField("site_tier", StringType(), True),
+        StructField("cpu_time", DoubleType(), True),
+        StructField("primary_name", StringType(), True),
+        StructField("processing_name", StringType(), True),
+        StructField("data_tier", StringType(), True),
+    ])
+
+def schema_empty_aaa():
+    """
+    src_experiment_site: string (nullable = true)
+    user_dn: string (nullable = true)
+    file_lfn: string (nullable = true)
+    """
+    return StructType([
+        StructField("src_experiment_site", StringType(), True),
+        StructField("user_dn", StringType(), True),
+        StructField("file_lfn", StringType(), True),
+    ])
+
+def schema_empty_eos():
+    """
+    src_experiment_site: string (nullable = true)
+    """
+    return StructType([
+        StructField("file_lfn", StringType(), True),
+        StructField("user_dn", StringType(), True),
+        StructField("host", StringType(), True),
+    ])
+

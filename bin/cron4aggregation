@@ -1,0 +1,20 @@
+#!/bin/bash
+# this script is designed to be used in crontab, i.e. with full path
+# adjust script to put your desired notification address if necessary
+
+addr=cms-popdb-alarms@cern.ch
+addr=vkuznet@gmail.com
+
+# DO NOT EDIT BELOW THIS LINE
+
+me=$(dirname "$0")
+wdir=`echo $me | sed -e "s,/bin,,g"`
+log=$wdir/agg-`date +%Y%m%d`.log
+export PYTHONPATH=$wdir/src/python:$PYTHONPATH
+export PATH=$wdir/bin:$PATH
+cmd="$wdir/bin/run_aggregation $wdir/etc/conf.json"
+msg="Error while executing $cmd on $USER@`hostname` log at $log"
+set -e
+trap "echo \"$msg\" | mail -s \"Cron alert CMS Popularity\" \"$addr\"" ERR
+
+$cmd >> $log 2>&1

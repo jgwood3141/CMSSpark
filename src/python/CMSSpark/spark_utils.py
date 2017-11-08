@@ -22,7 +22,7 @@ from CMSSpark.schemas import schema_processing_eras, schema_dataset_access_types
 from CMSSpark.schemas import schema_acquisition_eras,  schema_datasets, schema_blocks
 from CMSSpark.schemas import schema_files, schema_mod_configs, schema_out_configs
 from CMSSpark.schemas import schema_rel_versions, schema_file_lumis, schema_phedex
-from CMSSpark.schemas import schema_jm, schema_cmssw, schema_asodb
+from CMSSpark.schemas import schema_jm, schema_cmssw, schema_asodb, schema_empty_aaa, schema_empty_eos
 
 from pyspark import SparkContext, StorageLevel
 from pyspark.sql import Row
@@ -94,14 +94,19 @@ def avro_files(path, verbose=0):
     fnames = [f for f in pipe.stdout.read().split('\n') if f.endswith('avro')]
     return fnames
 
-def unionAll(dfs):
+def unionAll(dfs, cols=None):
     """
     Unions snapshots in one dataframe
 
     :param item: list of dataframes
     :returns: union of dataframes
     """
-    return reduce(DataFrame.unionAll, dfs)
+
+    if cols == None:
+        return reduce(DataFrame.unionAll, dfs)
+    else:
+        return unionAll(df.select(cols) for df in dfs)
+
 
 def file_list(basedir, fromdate=None, todate=None):
     """
@@ -192,9 +197,9 @@ def file_list(basedir, fromdate=None, todate=None):
 def print_rows(df, dfname, verbose, head=5):
     "Helper function to print rows from a given dataframe"
     if  verbose:
-        print("\n\nFirst rows of %s" % dfname)
-        for row in df.head(head):
-            print("### row", row)
+        print('First %s rows of %s' % (head, dfname))
+        for i, row in enumerate(df.head(head)):
+            print('%s. %s' % (i, row))
 
 def spark_context(appname='cms', yarn=None, verbose=False, python_files=[]):
     # define spark context, it's main object which allow
@@ -209,6 +214,11 @@ def spark_context(appname='cms', yarn=None, verbose=False, python_files=[]):
     if yarn:
         logger.info("YARN client mode enabled")
     return ctx
+
+
+def delete_hadoop_directory(path):
+    os.popen("hadoop fs -rm -r \"" + path + "\"")
+
 
 def phedex_tables(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False):
     """
@@ -420,7 +430,8 @@ def dbs_tables_all(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False):
 def cmssw_tables(ctx, sqlContext,
         hdir='hdfs:///project/awg/cms/cmssw-popularity/avro-snappy', date=None, verbose=None):
     """
-    Parse CMSSW HDFS records.
+    Parse CMSSW HDFS records, comes from
+    https://gitlab.cern.ch/awg/awg-ETL-crons/blob/master/sqoop/cmssw-popularity.sh
 
     Example of CMSSW record on HDFS
     {"UNIQUE_ID":"08F8DD3A-0FFE-E611-B710-BC305B3909F1-1","FILE_LFN":"/s.root",
@@ -461,7 +472,8 @@ def cmssw_tables(ctx, sqlContext,
 def jm_tables(ctx, sqlContext,
         hdir='hdfs:///project/awg/cms/jm-data-popularity/avro-snappy', date=None, verbose=None):
     """
-    Parse JobMonitoring popularity HDFS records.
+    Parse JobMonitoring popularity HDFS records comes from
+    https://gitlab.cern.ch/awg/awg-ETL-crons/blob/master/sqoop/jm-cms-data-pop.sh
 
     Example of jm-data-popularity record on HDFS
     {"JobId":"1672451388","FileName":"//store/file.root","IsParentFile":"0","ProtocolUsed":"Remote",
@@ -483,7 +495,10 @@ def jm_tables(ctx, sqlContext,
     jdf = sqlContext.createDataFrame(rdd, schema=schema_jm())
     df = jdf.withColumn("WrapWC", jdf["WrapWC"].cast(DoubleType()))\
             .withColumn("WrapCPU", jdf["WrapCPU"].cast(DoubleType()))\
-            .withColumn("ExeCPU", jdf["ExeCPU"].cast(DoubleType()))
+            .withColumn("ExeCPU", jdf["ExeCPU"].cast(DoubleType()))\
+            .withColumn("NCores", jdf["NCores"].cast(IntegerType()))\
+            .withColumn("NEvProc", jdf["NEvProc"].cast(IntegerType()))\
+            .withColumn("NEvReq", jdf["NEvReq"].cast(IntegerType()))
     df.registerTempTable('jm_df')
     tables = {'jm_df': df}
     return tables
@@ -550,8 +565,12 @@ def avro_rdd(ctx, sqlContext, hdir, date=None, verbose=None):
     awrite="org.apache.hadoop.io.NullWritable"
     aconv="org.apache.spark.examples.pythonconverters.AvroWrapperToJavaConverter"
 
+    rdd = []
     # load data from HDFS
-    rdd = ctx.union([ctx.newAPIHadoopFile(f, aformat, akey, awrite, aconv) for f in afiles])
+    if len(afiles) == 0:
+        rdd = ctx.emptyRDD()
+    else:
+        rdd = ctx.union([ctx.newAPIHadoopFile(f, aformat, akey, awrite, aconv) for f in afiles])
 
     # the records are stored as [(dict, None), (dict, None)], therefore we take first element
     # and assign them to new rdd
@@ -617,7 +636,11 @@ def aaa_tables(sqlContext,
         hdir='hdfs:///project/monitoring/archive/xrootd/raw/gled',
         date=None, verbose=False):
     """
-    Parse AAA HDFS records.
+    Parse AAA HDFS records. This data set comes from XRootD servers around the
+    world. Data is send by XRootD servers across CERN and US to dedicated
+    clients, called GLED. These GLED clients collect the XRootD data and send
+    it a messaging broker at CERN. From the messaging broker, data is consumer
+    by us and integrated in the MONIT infrastructure.
 
     Example of AAA (xrootd) JSON record on HDFS
     {"data":{"activity":"r","app_info":"","client_domain":"cern.ch","client_host":"b608a4fe55","end_time":1491789715000,"file_lfn":"/eos/cms/store/hidata/PARun2016C/PAEGJet1/AOD/PromptReco-v1/000/286/471/00000/7483FE13-28BD-E611-A2BD-02163E01420E.root","file_size":189272229,"is_transfer":true,"operation_time":690,"read_average":0.0,"read_bytes":0,"read_bytes_at_close":189272229,"read_max":0,"read_min":0,"read_operations":0,"read_sigma":0.0,"read_single_average":0.0,"read_single_bytes":0,"read_single_max":0,"read_single_min":0,"read_single_operations":0,"read_single_sigma":0.0,"read_vector_average":0.0,"read_vector_bytes":0,"read_vector_count_average":0.0,"read_vector_count_max":0,"read_vector_count_min":0,"read_vector_count_sigma":0.0,"read_vector_max":0,"read_vector_min":0,"read_vector_operations":0,"read_vector_sigma":0.0,"remote_access":false,"server_domain":"cern.ch","server_host":"p05799459u51457","server_username":"","start_time":1491789025000,"throughput":274307.57826086954,"unique_id":"03404bbc-1d90-11e7-9717-47f48e80beef-2e48","user":"","user_dn":"","user_fqan":"","user_role":"","vo":"","write_average":0.0,"write_bytes":0,"write_bytes_at_close":0,"write_max":0,"write_min":0,"write_operations":0,"write_sigma":0.0},"metadata":{"event_timestamp":1491789715000,"hostname":"monit-amqsource-fafa51de8d.cern.ch","kafka_timestamp":1491789741627,"original-destination":"/topic/xrootd.cms.eos","partition":"10","producer":"xrootd","timestamp":1491789740015,"topic":"xrootd_raw_gled","type":"gled","type_prefix":"raw","version":"003"}}
@@ -641,11 +664,44 @@ def aaa_tables(sqlContext,
     tables = {'aaa_df':aaa_df}
     return tables
 
+def aaa_tables_enr(sqlContext,
+        hdir='hdfs:///project/monitoring/archive/xrootd/enr/gled',
+        date=None, verbose=False):
+    """
+    Parse AAA HDFS records.
+
+    Example of AAA (xrootd) JSON record on HDFS
+    {"data":{"activity":"r","app_info":"","client_domain":"cern.ch","client_host":"b608a4fe55","end_time":1491789715000,"file_lfn":"/eos/cms/store/hidata/PARun2016C/PAEGJet1/AOD/PromptReco-v1/000/286/471/00000/7483FE13-28BD-E611-A2BD-02163E01420E.root","file_size":189272229,"is_transfer":true,"operation_time":690,"read_average":0.0,"read_bytes":0,"read_bytes_at_close":189272229,"read_max":0,"read_min":0,"read_operations":0,"read_sigma":0.0,"read_single_average":0.0,"read_single_bytes":0,"read_single_max":0,"read_single_min":0,"read_single_operations":0,"read_single_sigma":0.0,"read_vector_average":0.0,"read_vector_bytes":0,"read_vector_count_average":0.0,"read_vector_count_max":0,"read_vector_count_min":0,"read_vector_count_sigma":0.0,"read_vector_max":0,"read_vector_min":0,"read_vector_operations":0,"read_vector_sigma":0.0,"remote_access":false,"server_domain":"cern.ch","server_host":"p05799459u51457","server_username":"","start_time":1491789025000,"throughput":274307.57826086954,"unique_id":"03404bbc-1d90-11e7-9717-47f48e80beef-2e48","user":"","user_dn":"","user_fqan":"","user_role":"","vo":"","write_average":0.0,"write_bytes":0,"write_bytes_at_close":0,"write_max":0,"write_min":0,"write_operations":0,"write_sigma":0.0},"metadata":{"event_timestamp":1491789715000,"hostname":"monit-amqsource-fafa51de8d.cern.ch","kafka_timestamp":1491789741627,"original-destination":"/topic/xrootd.cms.eos","partition":"10","producer":"xrootd","timestamp":1491789740015,"topic":"xrootd_raw_gled","type":"gled","type_prefix":"raw","version":"003"}}
+
+    :returns: a dictionary with AAA Spark DataFrame
+    """
+    if  not date:
+        # by default we read yesterdate data
+        date = time.strftime("%Y/%m/%d", time.gmtime(time.time()-60*60*24))
+
+    hpath = '%s/%s' % (hdir, date)
+    cols = ['data.src_experiment_site', 'data.user_dn', 'data.file_lfn']
+
+    files_in_hpath = files(hpath, verbose)
+
+    aaa_df = []
+
+    if len(files_in_hpath) == 0:
+        aaa_df = sqlContext.createDataFrame([], schema=schema_empty_aaa())
+    else:
+        aaa_df = unionAll([sqlContext.jsonFile(path) for path in files_in_hpath], cols)
+
+    aaa_df.registerTempTable('aaa_df')
+    tables = {'aaa_df':aaa_df}
+    return tables
+
 def eos_tables(sqlContext,
         hdir='hdfs:///project/monitoring/archive/eos/logs/reports/cms',
         date=None, verbose=False):
     """
-    Parse EOS HDFS records
+    Parse EOS HDFS records. This data set comes from EOS servers at CERN. Data
+    is send directly by the EOS team, reading the EOS logs and sending them
+    into the MONIT infrastructure.
 
     Example of EOS JSON record on HDFS
     {"data":"\"log=9e7436fe-1d8e-11e7-ba07-a0369f1fbf0c&path=/store/mc/PhaseISpring17GS/MinBias_TuneCUETP8M1_13TeV-pythia8/GEN-SIM/90X_upgrade2017_realistic_v20-v1/50000/72C78841-2110-E711-867F-F832E4CC4D39.root&ruid=8959&rgid=1399&td=nobody.693038:472@fu-c2e05-24-03-daq2fus1v0--cms&host=p05798818q44165.cern.ch&lid=1048850&fid=553521212&fsid=18722&ots=1491788403&otms=918&cts=1491789688&ctms=225&rb=19186114&rb_min=104&rb_max=524288&rb_sigma=239596.05&wb=0&wb_min=0&wb_max=0&wb_sigma=0.00&sfwdb=7576183815&sbwdb=6313410471&sxlfwdb=7575971197&sxlbwdb=6313300667&nrc=72&nwc=0&nfwds=24&nbwds=10&nxlfwds=12&nxlbwds=4&rt=9130.44&wt=0.00&osize=3850577700&csize=3850577700&sec.prot=gsi&sec.name=cmsprd&sec.host=cms-ucsrv-c2f46-32-07.cern.ch&sec.vorg=&sec.grps=&sec.role=&sec.info=/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=amaltaro/CN=718748/CN=Alan Malta Rodrigues&sec.app=\"","metadata":{"host":"eoscms-srv-m1.cern.ch","kafka_timestamp":1491789692305,"partition":"14","path":"cms","producer":"eos","timestamp":1491789689562,"topic":"eos_logs","type":"reports","type_prefix":"logs"}}
@@ -660,19 +716,32 @@ def eos_tables(sqlContext,
         date = time.strftime("%Y/%m/%d", time.gmtime(time.time()-60*60*24))
 
     hpath = '%s/%s' % (hdir, date)
-    rdd = unionAll([sqlContext.jsonFile(path) for path in files(hpath, verbose)])
+    cols = ['data', 'metadata.timestamp']
+
+    files_in_hpath = files(hpath, verbose)
+
+    if len(files_in_hpath) == 0:
+        eos_df = sqlContext.createDataFrame([], schema=schema_empty_eos())
+        eos_df.registerTempTable('eos_df')
+        tables = {'eos_df':eos_df}
+        return tables
+    
+    rdd = unionAll([sqlContext.jsonFile(path) for path in files_in_hpath], cols)
+
     def parse_log(r):
         "Local helper function to parse EOS record and extract intersting fields"
         rdict = {}
-        for item in r['data'].split('&'):
+        for item in str(r['data']).split('&'):
             if  item.startswith('path='):
                 rdict['file_lfn'] = item.split('path=')[-1]
             if  item.startswith('sec.info='):
                 rdict['user_dn'] = item.split('sec.info=')[-1]
+            if  item.startswith('sec.app='):
+                rdict['application'] = item.split('sec.app=')[-1]
             if  item.startswith('sec.host='):
                 rdict['host'] = item.split('sec.host=')[-1]
 
-        rdict['timestamp'] = r['metadata']['timestamp']
+        rdict['timestamp'] = r['timestamp']
 
         return rdict
 
@@ -740,7 +809,9 @@ def unpack_struct(colname, df):
 
 def aso_tables(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False):
     """
-    Parse ASO records on HDFS via mapping ASO tables to Spark SQLContext.
+    Parse ASO records on HDFS via mapping ASO tables to Spark SQLContext, data comes from
+    https://gitlab.cern.ch/awg/awg-ETL-crons/blob/master/sqoop/cms-aso.sh
+
     :returns: a dictionary with ASO Spark DataFrame.
     """
     adir = hdir+'/CMS_ASO/filetransfersdb/merged'
